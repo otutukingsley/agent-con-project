@@ -1,14 +1,14 @@
 import logging
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any  # Added Dict and Any
+from typing import List, Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from newsapi import NewsApiClient
-from newspaper import Article, ArticleException
+import newspaper 
+from newspaper import Article as NewspaperArticle, ArticleException
 import os
-
-from .config import RESPONSE_SCHEMA
-from .core import validate_json_response, simple_summarize
+import requests
+from bs4 import BeautifulSoup
 
 # Custom logging format
 logging.basicConfig(
@@ -33,10 +33,10 @@ class ArticleContent(BaseModel):
 
 def fetch_articles(
     query: str,
-    days_back: int = 7,
-    sources: Optional[str] = None,
-    max_articles: int = 30,
-    language: str = "en"
+    days_back: int,
+    sources: Optional[str],
+    max_articles: int,
+    language: str
 ) -> List[Article]:
     """
     Retrieve news articles based on the provided query and parameters.
@@ -46,7 +46,7 @@ def fetch_articles(
         days_back: Number of past days to include in the search.
         sources: Comma-separated list of domains to search (optional).
         max_articles: Maximum number of articles to return.
-        language: Language of the articles (default: 'en').
+        language: Language of the articles.
 
     Returns:
         List of Article objects containing headline, link, summary, and publisher.
@@ -89,51 +89,33 @@ def extract_article_content(links: List[str]) -> List[ArticleContent]:
         List of ArticleContent objects with the URL and extracted content (or empty string if failed).
     """
     content_list = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     for link in links:
         try:
-            logger.info(f"Processing article: {link}")
-            article = Article(link)
+            logger.info(f"Processing article with newspaper: {link}")
+            article = NewspaperArticle(url=link, config=newspaper.Config())
             article.download()
             if article.download_state != 2:
                 raise ArticleException(f"Download failed for {link}")
             article.parse()
             content = article.text or ""
-            logger.info(f"Extracted {len(content)} characters from {link}")
+            logger.info(f"Extracted {len(content)} characters from {link} with newspaper")
             truncated_content = content[:5000] + ("..." if len(content) > 5000 else "")
             content_list.append(ArticleContent(link=link, content=truncated_content))
-        except ArticleException as e:
-            logger.warning(f"Failed to process article {link}: {e}")
-            content_list.append(ArticleContent(link=link, content=""))
-        except Exception as e:
-            logger.error(f"Unexpected error for {link}: {e}")
-            content_list.append(ArticleContent(link=link, content=""))
+        except (ArticleException, Exception) as e:
+            logger.warning(f"Newspaper failed for {link}: {e}, trying BeautifulSoup fallback")
+            try:
+                response = requests.get(link, headers=headers, timeout=10)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, 'html.parser')
+                paragraphs = soup.find_all('p')
+                content = " ".join(p.get_text(strip=True) for p in paragraphs)
+                logger.info(f"Extracted {len(content)} characters from {link} with BeautifulSoup")
+                truncated_content = content[:5000] + ("..." if len(content) > 5000 else "")
+                content_list.append(ArticleContent(link=link, content=truncated_content))
+            except Exception as e2:
+                logger.error(f"BeautifulSoup failed for {link}: {e2}")
+                content_list.append(ArticleContent(link=link, content=""))
     return content_list
-
-def generate_topic_summary(query: str) -> Dict[str, Any]:
-    """
-    Generate a summary for a topic by fetching and summarizing articles.
-
-    Args:
-        query: Topic to summarize.
-
-    Returns:
-        JSON response with an 'overview' field containing the summary and source URLs.
-    """
-    try:
-        articles = fetch_articles(query, max_articles=5)
-        article_urls = [article.link for article in articles]
-        contents = extract_article_content(article_urls)
-        summary_text = simple_summarize(
-            [{"content": content.content} for content in contents]
-        )
-        response = {
-            "overview": {
-                "text": summary_text,
-                "sources": article_urls
-            }
-        }
-        return validate_json_response(response)
-    except Exception as e:
-        logger.error(f"Error generating summary for query {query}: {e}")
-        return {}
-

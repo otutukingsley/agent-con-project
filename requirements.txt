@@ -6,3 +6,5 @@ python-dotenv~=1.1.0
 lxml[html_clean]
 protobuf~=5.29.4
 python-multipart
+beautifulsoup4
+requests
